@@ -1,0 +1,83 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  typecheck:
+    name: Type checking
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0 # setuptools-scm needs tags to determine the version
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+      - name: Run mypy
+        run: uv run mypy
+
+  test:
+    name: ${{ matrix.platform }} py${{ matrix.python-version }} ${{ matrix.resolution }}
+    runs-on: ${{ matrix.platform }}
+    env:
+      # disable resyncing on uv run
+      UV_NO_SYNC: "1"
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [ubuntu-latest, macos-latest, windows-latest]
+        python-version:
+          - "3.12"
+          - "3.13"
+        resolution: [highest, lowest-direct]
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0 # setuptools-scm needs tags to determine the version
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --no-dev --group test --resolution ${{ matrix.resolution }}
+
+      - name: Test
+        run: uv run pytest --color=yes --cov --cov-report=xml --cov-report=term-missing
+
+      # Coverage works out of the box for public repos. Private repos need a
+      # CODECOV_TOKEN repository secret.
+      - name: Coverage
+        uses: codecov/codecov-action@v7
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+
+  deploy:
+    name: Create release
+    needs: [test, typecheck]
+    if: success() && startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # for creating the GitHub release
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Create release
+        uses: softprops/action-gh-release@v3
+        with:
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, 'rc') || contains(github.ref_name, 'a') || contains(github.ref_name, 'b') }}
