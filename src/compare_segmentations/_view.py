@@ -48,11 +48,11 @@ class _MergeHider:
         self._color_dict[None] = np.array([0.0, 0.0, 0.0, 0.0], dtype=np.float32)
         layer.colormap = DirectLabelColormap(color_dict=self._color_dict)
 
-    def update(self, flagged_labels: set[int]) -> None:
+    def update(self, flagged_labels: set[int], show_merged: bool = False) -> None:
         for label, color in self._color_dict.items():
             if label is None:
                 continue
-            color[3] = 1.0 if label in flagged_labels else 0.0
+            color[3] = 1.0 if (show_merged or label in flagged_labels) else 0.0
         # mutating color_dict values in place, then clearing the cache and reassigning the
         # same colormap object, rebuilds only the (cheap) GPU texture -- not the (slow)
         # per-color validation a new DirectLabelColormap(...) would trigger.
@@ -105,17 +105,24 @@ def view_comparison(
 
     Each segmentation layer only shows labels currently in `result.conflicts` or
     `result.unmatched` -- merged labels are made transparent via the layer's colormap
-    (see `_MergeHider`), never removed from the underlying array. Segmentation layers
-    open in contour mode (outlines only), so overlapping flagged shapes across
-    segmentations stay distinguishable.
+    (see `_MergeHider`), never removed from the underlying array. A "Show merged
+    labels" checkbox in the Thresholds widget toggles that transparency off, revealing
+    every label (merged or not) for inspection. Segmentation layers open in contour
+    mode (outlines only), so overlapping flagged shapes across segmentations stay
+    distinguishable.
 
-    Includes two sliders, IoU threshold and min overlap. Both reclassify and re-merge
-    purely from the already-computed `overlaps` on every change -- `min_overlap` only
-    filters IoU values that are already known (see `compare_segmentations`), so neither
-    slider ever re-touches pixel data. This means `overlaps` must have been computed (via
+    Includes two sliders, IoU threshold and min overlap, plus the "Show merged labels"
+    checkbox. All three reclassify and re-merge purely from the already-computed
+    `overlaps` on every change -- `min_overlap` only filters IoU values that are
+    already known (see `compare_segmentations`), so neither slider ever re-touches
+    pixel data. This means `overlaps` must have been computed (via
     `compute_pairwise_overlaps`) with a `min_overlap` at or below the lowest value the
     slider should reach -- the default range here goes down to 0.0, so pass `overlaps`
     computed with `min_overlap=0.0` for the full slider range to work.
+
+    A summary label below the checkbox reports the current counts: agreeing (merged)
+    labels, conflicting labels (and how many conflict groups they fall into), and
+    unmatched labels -- updated on every slider/checkbox change alongside the layers.
 
     Also includes a "Copy Label" widget for resolving conflicts/unmatched labels by
     hand: pick a source layer, a target layer, and a label value (defaults to the
@@ -145,6 +152,7 @@ def view_comparison(
     """
     import napari
     from magicgui import magicgui
+    from magicgui.widgets import Label
 
     from ._compare import compare_segmentations, precompute_segmentation_props
 
@@ -182,21 +190,41 @@ def view_comparison(
     hiders = [_MergeHider(layer, seg) for layer, seg in zip(seg_layers, segmentations, strict=True)]
     merged_layer = viewer.add_labels(initial_result.merged, name="merged")
 
-    def _apply_result(result: ComparisonResult) -> None:
+    def _summary_text(result: ComparisonResult) -> str:
+        num_agree = int(result.merged.max())
+        num_conflict = sum(len(group) for group in result.conflicts)
+        num_unmatched = len(result.unmatched)
+        unmatched_by_source: dict[int, int] = {}
+        for ref in result.unmatched:
+            unmatched_by_source[ref.source] = unmatched_by_source.get(ref.source, 0) + 1
+        by_run_lines = "\n".join(
+            f"  {names[source]}: {unmatched_by_source.get(source, 0)}"
+            for source in range(len(segmentations))
+        )
+        return (
+            f"agreeing: {num_agree}\n"
+            f"conflicting: {num_conflict} ({len(result.conflicts)} groups)\n"
+            f"unmatched: {num_unmatched}\n"
+            f"unmatched by run:\n{by_run_lines}"
+        )
+
+    def _apply_result(result: ComparisonResult, show_merged: bool = False) -> None:
         merged_layer.data = result.merged
         flagged_by_source = _flagged_labels_by_source(result)
         for source, hider in enumerate(hiders):
-            hider.update(flagged_by_source.get(source, set()))
-
-    _apply_result(initial_result)
+            hider.update(flagged_by_source.get(source, set()), show_merged=show_merged)
+        summary_label.value = _summary_text(result)
 
     @magicgui(
         auto_call=True,
         iou_threshold={"widget_type": "FloatSlider", "min": 0.0, "max": 1.0, "step": 0.01},
         min_iou_overlap={"widget_type": "FloatSlider", "min": 0.0, "max": 1.0, "step": 0.01},
+        show_merged_labels={"widget_type": "CheckBox", "label": "Show merged labels"},
     )
     def _set_thresholds(
-        iou_threshold: float = threshold, min_iou_overlap: float = min_overlap
+        iou_threshold: float = threshold,
+        min_iou_overlap: float = min_overlap,
+        show_merged_labels: bool = False,
     ) -> None:
         result = compare_segmentations(
             segmentations,
@@ -207,7 +235,12 @@ def view_comparison(
             props=props,
             blend_cache=blend_cache,
         )
-        _apply_result(result)
+        _apply_result(result, show_merged=show_merged_labels)
+
+    summary_label = Label(value="")
+    _set_thresholds.append(summary_label)
+
+    _apply_result(initial_result)
 
     viewer.window.add_dock_widget(_set_thresholds, name="Thresholds", area="right")
 

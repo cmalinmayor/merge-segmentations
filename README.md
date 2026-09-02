@@ -5,6 +5,8 @@
 
 Small library for comparing and resolving multiple segmentations of the same i
 
+![Demo of the napari comparison viewer](docs/demo.gif)
+
 ## Installation
 
 ```bash
