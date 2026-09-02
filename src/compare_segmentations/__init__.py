@@ -6,13 +6,16 @@ from ._compare import (
     ComparisonResult,
     LabelRef,
     PairwiseOverlap,
+    SegmentationProps,
     compare_segmentations,
     compute_pairwise_overlaps,
     find_overlapping_labels,
     load_pairwise_overlaps,
     merge_segmentations,
+    precompute_segmentation_props,
     save_pairwise_overlaps,
 )
+from ._view import view_comparison
 
 try:
     __version__ = version("compare-segmentations")
@@ -25,11 +28,14 @@ __all__ = [
     "ComparisonResult",
     "LabelRef",
     "PairwiseOverlap",
+    "SegmentationProps",
     "__version__",
     "compare_segmentations",
     "compute_pairwise_overlaps",
     "find_overlapping_labels",
     "load_pairwise_overlaps",
     "merge_segmentations",
+    "precompute_segmentation_props",
     "save_pairwise_overlaps",
+    "view_comparison",
 ]

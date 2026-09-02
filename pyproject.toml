@@ -32,9 +32,21 @@ dependencies = [
     "traccuracy>=0.3,<1",
 ]
 
+[project.optional-dependencies]
+view = [
+    "janelia-pathlib",
+    "magicgui>=0.9,<1",
+    "napari[pyqt6]>=0.5,<1",
+    "tifffile>=2024.1,<2027",
+    "zarr>=3,<4",
+]
+
 [project.urls]
 homepage = "https://github.com/JaneliaSciComp/compare_segmentations"
 repository = "https://github.com/JaneliaSciComp/compare_segmentations"
+
+[tool.uv.sources]
+janelia-pathlib = { git = "ssh://git@github.com/JaneliaSciComp/janelia-pathlib.git" }
 
 # https://peps.python.org/pep-0735/
 [dependency-groups]
@@ -99,8 +111,10 @@ testpaths = ["tests"]
 pythonpath = ["tests"]
 filterwarnings = [
     "error",
-    # if needed, add global ignores here, for example:
-    # "ignore:Some message:SomeCategory",
+    # napari's pytest plugin (installed with the `view` extra) auto-applies an
+    # autouse fixture that imports its own pydantic models, which trips this on
+    # every test regardless of whether napari is actually used.
+    "ignore:`json_encoders` is deprecated:pydantic.warnings.PydanticDeprecatedSince20",
 ]
 
 # https://mypy.readthedocs.io/en/stable/config_file.html
@@ -114,7 +128,15 @@ pretty = true
 
 # these ship no type information / no py.typed marker, so calls into them are untyped.
 [[tool.mypy.overrides]]
-module = ["networkx.*", "scipy.*", "skimage.*", "traccuracy.*"]
+module = [
+    "janelia_pathlib.*",
+    "magicgui.*",
+    "napari.*",
+    "networkx.*",
+    "scipy.*",
+    "skimage.*",
+    "traccuracy.*",
+]
 ignore_missing_imports = true
 
 # https://coverage.readthedocs.io/en/latest/config.html

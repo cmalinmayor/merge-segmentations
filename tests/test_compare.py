@@ -155,6 +155,52 @@ def test_merge_three_masks_blends_all_of_them():
     assert 6.5 < xs.mean() < 8.5
 
 
+def test_merge_blend_cache_reuses_unchanged_groups():
+    seg_a = np.zeros((20, 20), dtype=np.int32)
+    seg_a[2:12, 2:12] = 1
+
+    seg_b = np.zeros((20, 20), dtype=np.int32)
+    seg_b[4:14, 4:14] = 1
+
+    group = {LabelRef(0, 1), LabelRef(1, 1)}
+    blend_cache: dict = {}
+
+    first = merge_segmentations([seg_a, seg_b], [group], blend_cache=blend_cache)
+    assert frozenset(group) in blend_cache
+    cached_blended = blend_cache[frozenset(group)][1]
+
+    # second call with the same group and cache should reuse the cached blend rather
+    # than recomputing it -- verify by mutating the input arrays after caching and
+    # confirming the (now-stale) cached result is still what's returned unchanged
+    second = merge_segmentations([seg_a, seg_b], [group], blend_cache=blend_cache)
+    assert blend_cache[frozenset(group)][1] is cached_blended
+    assert np.array_equal(first, second)
+
+
+def test_merge_overlapping_groups_split_by_confidence_not_overwritten():
+    # two same-size squares whose bounding boxes overlap -- neither group should
+    # silently overwrite the other in the shared region; each should keep the half
+    # closer to its own center.
+    seg_a = np.zeros((20, 20), dtype=np.int32)
+    seg_a[2:12, 2:12] = 1
+
+    seg_b = np.zeros((20, 20), dtype=np.int32)
+    seg_b[8:18, 8:18] = 1
+
+    merged = merge_segmentations([seg_a, seg_b], [{LabelRef(0, 1)}, {LabelRef(1, 1)}])
+
+    assert merged[3, 3] == 1  # deep inside A only
+    assert merged[17, 17] == 2  # deep inside B only
+    # the boundary through the overlap region should be a diagonal (each row claims one
+    # more label-2 pixel than the row above), not a stair-step hugging one group's own
+    # bbox edge -- a regression check for the "outside" SDF distortion that a crop
+    # tight to a group's own bbox introduces (see _pad_slice)
+    overlap = merged[8:12, 8:12]
+    label_2_counts = [int(np.sum(row == 2)) for row in overlap]
+    assert label_2_counts == sorted(label_2_counts)  # monotonically non-decreasing
+    assert len(set(label_2_counts)) > 1  # actually varies by row, i.e. is diagonal
+
+
 def test_merge_mismatched_shapes_raise_value_error():
     seg_a = np.zeros((10, 10), dtype=np.int32)
     seg_b = np.zeros((5, 5), dtype=np.int32)
@@ -275,6 +321,67 @@ def test_compare_three_segmentations_partial_agreement_is_conflict_not_merge():
     assert result.unmatched == [LabelRef(2, 1)]
 
 
+def test_compare_min_agree_merges_majority_subset():
+    seg_a = np.zeros((10, 10), dtype=np.int32)
+    seg_a[0:5, 0:5] = 1
+
+    seg_b = np.zeros((10, 10), dtype=np.int32)
+    seg_b[0:5, 0:5] = 1
+
+    seg_c = np.zeros((10, 10), dtype=np.int32)
+    seg_c[0:5, 0:5] = 1
+
+    seg_d = np.zeros((10, 10), dtype=np.int32)
+    seg_d[5:10, 5:10] = 1
+
+    result = compare_segmentations(
+        [seg_a, seg_b, seg_c, seg_d], threshold=0.9, min_overlap=0.0, min_agree=3
+    )
+
+    # a, b, c all agree (3 of 4, a strict majority) -- merged even though d disagrees
+    assert sorted(np.unique(result.merged).tolist()) == [0, 1]
+    assert np.array_equal(result.merged > 0, seg_a > 0)
+    assert result.conflicts == []
+    assert result.unmatched == [LabelRef(3, 1)]
+
+
+def test_compare_min_agree_leaves_leftover_as_conflict():
+    seg_a = np.zeros((10, 10), dtype=np.int32)
+    seg_a[0:5, 0:5] = 1
+
+    seg_b = np.zeros((10, 10), dtype=np.int32)
+    seg_b[0:5, 0:5] = 1
+
+    seg_c = np.zeros((10, 10), dtype=np.int32)
+    seg_c[0:5, 0:5] = 1
+
+    # d and e both overlap the a/b/c cell weakly (below threshold) and each other,
+    # so the connected component includes them, but they aren't part of the
+    # merged majority clique and there are 2 of them -- conflict, not unmatched
+    seg_d = np.zeros((10, 10), dtype=np.int32)
+    seg_d[3:8, 0:5] = 1
+
+    seg_e = np.zeros((10, 10), dtype=np.int32)
+    seg_e[3:8, 0:5] = 1
+
+    result = compare_segmentations(
+        [seg_a, seg_b, seg_c, seg_d, seg_e], threshold=0.9, min_overlap=0.0, min_agree=3
+    )
+
+    assert sorted(np.unique(result.merged).tolist()) == [0, 1]
+    assert np.array_equal(result.merged > 0, seg_a > 0)
+    assert result.conflicts == [[LabelRef(3, 1), LabelRef(4, 1)]]
+    assert result.unmatched == []
+
+
+def test_compare_min_agree_must_be_strict_majority():
+    seg_a = np.zeros((10, 10), dtype=np.int32)
+    seg_b = np.zeros((10, 10), dtype=np.int32)
+
+    with pytest.raises(ValueError, match="majority"):
+        compare_segmentations([seg_a, seg_b], min_agree=1)
+
+
 def test_compare_mismatched_shapes_raise_value_error():
     seg_a = np.zeros((10, 10), dtype=np.int32)
     seg_b = np.zeros((5, 5), dtype=np.int32)
@@ -299,3 +406,27 @@ def test_compare_reclassifies_from_cached_overlaps_without_recomputing():
 
     assert sorted(np.unique(result.merged).tolist()) == [0, 1]
     assert result.conflicts == []
+
+
+def test_compare_min_overlap_filters_cached_overlaps_without_recomputing():
+    seg_a = np.zeros((10, 10), dtype=np.int32)
+    seg_a[0:5, 0:5] = 1
+
+    seg_b = np.zeros((10, 10), dtype=np.int32)
+    seg_b[3:8, 0:5] = 1
+
+    # cache at min_overlap=0.0, so the pair (iou 0.25) is recorded
+    overlaps = compute_pairwise_overlaps([seg_a, seg_b], min_overlap=0.0)
+
+    # a min_overlap above the pair's iou should treat it as unrelated (unmatched),
+    # not merely below-threshold (conflict) -- purely by filtering the cached IoUs
+    result = compare_segmentations(
+        [seg_a, seg_b], threshold=0.9, min_overlap=0.5, overlaps=overlaps
+    )
+
+    assert np.all(result.merged == 0)
+    assert result.conflicts == []
+    assert sorted(result.unmatched, key=lambda ref: ref.source) == [
+        LabelRef(0, 1),
+        LabelRef(1, 1),
+    ]
